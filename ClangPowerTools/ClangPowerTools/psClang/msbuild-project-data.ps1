@@ -531,3 +531,86 @@ Function Get-PchCppIncludeHeader([Parameter(Mandatory = $true)][string] $pchCppF
     }
     return ""
 }
+
+$global:includeCache = @{}
+
+Function Get-TranslationUnitIncludes( [Parameter(Mandatory = $true)]  [string]   $cppPath
+                                    , [Parameter(Mandatory = $false)] [string[]] $includeDirectories
+                                    , [Parameter(Mandatory = $false)] [System.Collections.Hashtable] $parentIncludes = @{}
+                                    )
+{
+    if (![System.IO.Path]::IsPathRooted($cppPath))
+    {
+      $cppPath = Canonize-Path -base $ProjectDir -child $cppPath -ignoreErrors
+      if ([string]::IsNullOrEmpty($cppPath))
+      {
+          return @()
+      }
+    }
+
+    if ($parentIncludes.ContainsKey($cppPath))
+    {
+        # stop cycle
+        return @() 
+    }
+
+    if ($global:includeCache.ContainsKey($cppPath))
+    {
+        return $global:includeCache[$cppPath]
+    }
+
+    $parentIncludes[$cppPath] = $true
+
+    $includeDirectories += Get-FileDirectory -filePath $cppPath
+
+    [string[]] $unitIncludes = @()
+
+    [string[]] $fileLines = Get-Content -path $cppPath
+
+    [int] $lineCount = 0
+    foreach ($line in $fileLines)
+    {
+        $lineCount += 1
+        $includeMatch = [regex]::match($line, '^\s*#include\s+"(\S+)"')
+        if ($includeMatch.Success)
+        {
+            [string] $includePath = $includeMatch.Groups[1].Value
+            if (![System.IO.Path]::IsPathRooted($includePath))
+            {
+                foreach ($includeDir in $includeDirectories)
+                {
+                    if ([string]::IsNullOrEmpty($includeDir))
+                    {
+                        continue
+                    }
+                    $absolutePath = Canonize-Path -base $includeDir -child $includePath -ignoreErrors
+                    if (![string]::IsNullOrEmpty($absolutePath))
+                    {
+                        $includePath = $absolutePath
+                        break
+                    } 
+                }
+            }
+            
+            $unitIncludes += $includePath
+        }
+        if ($lineCount -gt 50)
+        {
+            break
+        }
+    }
+    foreach ($include in $unitIncludes)
+    {
+        [string[]] $childIncludes = Get-TranslationUnitIncludes -cppPath $include `
+                                                                -includeDirectories $includeDirectories `
+                                                                -parentIncludes $parentIncludes
+        if ($childIncludes.Count -gt 0)
+        {
+            $unitIncludes += $childIncludes
+        }
+    }
+
+    $global:includeCache[$cppPath] = $unitIncludes
+
+    return $unitIncludes | select -unique
+}
